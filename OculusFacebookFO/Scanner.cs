@@ -1,4 +1,5 @@
-﻿using System.Diagnostics;
+﻿using System.Configuration;
+using System.Diagnostics;
 using FlaUI.Core;
 using FlaUI.Core.AutomationElements;
 using FlaUI.Core.Definitions;
@@ -6,7 +7,7 @@ using FlaUI.Core.EventHandlers;
 using FlaUI.UIA3;
 using Microsoft.Extensions.Configuration;
 using Serilog;
-using Console = System.Console;
+using Debug = System.Diagnostics.Debug;
 
 namespace OculusFacebookFO;
 
@@ -16,6 +17,8 @@ internal sealed class Scanner : IDisposable
     private readonly ILogger _logger;
     private readonly HashSet<string> _ignoredButtonNames;
     private readonly HashSet<string> _clickButtonNames;
+    private readonly string _lastButtonName;
+    
     private AutomationElement? _documentElement;
     private StructureChangedEventHandlerBase? _reactHandler;
 
@@ -27,56 +30,49 @@ internal sealed class Scanner : IDisposable
         _ignoredButtonNames = new(ignoredNames, StringComparer.OrdinalIgnoreCase);
         var clickNames = _configuration.GetRequiredSection("ClickButtonNames").Get<string[]>();
         _clickButtonNames = new(clickNames, StringComparer.OrdinalIgnoreCase);
+        _lastButtonName = _configuration.GetRequiredSection("LastButtonName").Get<string>();
         // As null until initialize
         _documentElement = null;
         _reactHandler = null;
     }
 
-    public async Task<ExitCode> InitializeAsync(CancellationToken token = default)
+    public async Task InitializeAsync(CancellationToken token = default)
     {
-        TimeSpan? timeout = _configuration.GetValue<TimeSpan?>("timeout", null);
-
-        // Find the running Oculus app
-        string? oculusAppName = _configuration.GetValue<string?>("OculusExeName", null);
-        if (string.IsNullOrWhiteSpace(oculusAppName))
-        {
-            _logger.Fatal("appsettings is missing {Key}", "OculusExeName");
-            return ExitCode.BadConfig;
-        }
-
-        var oculusAppProcess = FindOculusProcess(oculusAppName);
+        // Find the running Oculus Process
+        var oculusAppProcess = FindOculusProcess();
         if (oculusAppProcess is null)
         {
-            _logger.Fatal("Could not find Oculus App Process '{AppName}'", oculusAppName);
-            return ExitCode.BadOculusExe;
+            throw new OculusApplicationException("Could not find running Oculus Application Process");
         }
 
+        // Setup FLAUI
         using var app = Application.Attach(oculusAppProcess);
         using var automation = new UIA3Automation();
 
-        var oculusWindow = app.GetMainWindow(automation, timeout);
+        // Acquire the Main Window
+        var oculusWindow = app.GetMainWindow(automation, TimeSpan.FromSeconds(10));
         if (oculusWindow is null)
         {
-            _logger.Fatal("Could not find Oculus Main Window in {Timeout}", timeout);
-            return ExitCode.BadOculusExe;
+            throw new OculusApplicationException($"Could not find Oculus {app} Main Window");
         }
 
-        // We are always interacting with the window's main document
-        _documentElement =
-            oculusWindow.FindFirstChild(f => f.ByControlType(ControlType.Document).And(f.ByName("Oculus")));
-        if (_documentElement is null)
+        // We are interacting with the window's main document
+        _documentElement = oculusWindow.FindFirstChild(f => f.ByControlType(ControlType.Document).And(f.ByName("Oculus")));
+        // Sometimes it takes a bit to be found
+        while (_documentElement is null)
         {
-            var children = oculusWindow.FindAllChildren();
-            var desc = oculusWindow.FindAllDescendants();
-
-            _logger.Fatal("Could not find Oculus main window document");
-            return ExitCode.BadOculusExe;
+            await Task.Delay(TimeSpan.FromSeconds(1), token);
+            _documentElement = oculusWindow.FindFirstChild(f => f.ByControlType(ControlType.Document).And(f.ByName("Oculus")));
+            //
+            //
+            // var children = oculusWindow.FindAllChildren();
+            // var desc = oculusWindow.FindAllDescendants();
+            //
+            // throw new OculusApplicationException($"Could not find Oculus {app} {oculusWindow} Main Document");
         }
-
-        return ExitCode.Ok;
     }
 
-    public async Task ReactAsync(CancellationToken token = default)
+    /*public async Task ReactAsync(CancellationToken token = default)
     {
         if (_documentElement is null)
         {
@@ -94,63 +90,53 @@ internal sealed class Scanner : IDisposable
         {
             await Task.Delay(TimeSpan.FromSeconds(1d), token);
         }
-    }
+    }*/
 
-    public async Task<ExitCode> ScanAsync(CancellationToken token = default)
+    public async Task ScanAsync(CancellationToken token = default)
     {
         while (!token.IsCancellationRequested)
         {
-            // Scan for issue
-            var found = await HandleDocument();
+            // Scan our main document and handle anything applicable it contains
+            var result = await ScanDocumentAsync();
 
-            if (!found)
+            if (result == ScanResult.NothingFound)
             {
-                // Wait before checking again (cooldown)
-                await Task.Delay(TimeSpan.FromSeconds(5d), token);
+                await Task.Delay(TimeSpan.FromSeconds(5), token);
             }
-            else
+            else if (result == ScanResult.InProcess)
             {
-                await Task.Delay(TimeSpan.FromMilliseconds(100d), token);
+                await Task.Delay(TimeSpan.FromMilliseconds(100), token);
+            }
+            else if (result == ScanResult.Ended)
+            {
+                await Task.Delay(TimeSpan.FromMinutes(1), token);
             }
         }
-
-        return ExitCode.Cancelled;
+        token.ThrowIfCancellationRequested();
     }
 
-    private void OnStructureChanged(AutomationElement automationElement, StructureChangeType structureChangeType,
-                                    int[] rid)
+    private Process? FindOculusProcess()
     {
-        _logger.Information("Document Structure Changed: {Element} {ChangeType} {RID}",
-                            automationElement,
-                            structureChangeType,
-                            rid);
-
-        if (structureChangeType == StructureChangeType.ChildAdded)
+        string? oculusProcessName = _configuration.GetValue<string?>("OculusProcessName", null);
+        if (string.IsNullOrWhiteSpace(oculusProcessName))
         {
-            _logger.Information("Scanning for new buttons");
-            // Fire and forget
-            Task.Run(async () =>
-            {
-                bool found;
-                do
-                {
-                    found = await HandleDocument();
-                } while (found);
-            });
+            throw new InvalidOperationException($"{_configuration} is missing key '{"OculusProcessName"}'");
         }
-    }
 
-    private Process? FindOculusProcess(string oculusAppName)
-    {
-        return Process.GetProcessesByName(oculusAppName)
+        // There should only be a single valid process with this name
+        return Process.GetProcesses()
                       .Where(process =>
                       {
-                          // Working with `Process` can be fraught with Exceptions
                           try
                           {
-                              return process.MainWindowHandle != IntPtr.Zero &&
+                              // Matches process name
+                              return string.Equals(process.ProcessName, oculusProcessName) &&
+                                     // Has a valid main window Handle
+                                     process.MainWindowHandle != IntPtr.Zero &&
+                                     // Has a valid main window title
                                      !string.IsNullOrWhiteSpace(process.MainWindowTitle);
                           }
+                          // Process likes to throw Exceptions
                           catch
                           {
                               return false;
@@ -158,73 +144,104 @@ internal sealed class Scanner : IDisposable
                       })
                       .OneOrDefault();
     }
+    
+    //
+    // private void OnStructureChanged(AutomationElement automationElement, StructureChangeType structureChangeType,
+    //                                 int[] rid)
+    // {
+    //     _logger.Information("Document Structure Changed: {Element} {ChangeType} {RID}",
+    //                         automationElement,
+    //                         structureChangeType,
+    //                         rid);
+    //
+    //     if (structureChangeType == StructureChangeType.ChildAdded)
+    //     {
+    //         _logger.Information("Scanning for new buttons");
+    //         // Fire and forget
+    //         Task.Run(async () =>
+    //         {
+    //             bool found;
+    //             do
+    //             {
+    //                 found = await ScanDocumentAsync();
+    //             } while (found);
+    //         });
+    //     }
+    // }
 
-    private async Task<bool> HandleDocument()
+   
+
+    private async Task<ScanResult> ScanDocumentAsync()
     {
-        if (_documentElement is null) throw new InvalidOperationException();
-
-        // We're looking for very specific buttons
+        Debug.Assert(_documentElement is not null);
+        
+        // Find all descendant buttons
         var buttons = _documentElement.FindAllDescendants(f => f.ByControlType(ControlType.Button))
+                                      // Only specific ones
                                       .Where(ae =>
                                       {
-                                          if (ae is null) return false;
-                                          string? name;
-                                          try
-                                          {
-                                              name = ae.Name;
-                                          }
-                                          catch
-                                          {
-                                              return false;
-                                          }
-
+                                          // Some AutomationElements do not support the Name property
+                                          var nameProperty = ae.Properties.Name;
+                                          if (!nameProperty.IsSupported) return false;
+                                          string name = nameProperty.Value;
+                                          // Ignore any with bad names            
                                           return !string.IsNullOrWhiteSpace(name) &&
                                                  !_ignoredButtonNames.Contains(name);
                                       })
+                                      // As Button
                                       .Select(ae => ae.AsButton())
                                       .ToList();
 
-        // If we have none, cooldown
+        // None?
         if (buttons.Count == 0)
         {
-            var cooldown = TimeSpan.FromSeconds(0.5d);
-            _logger.Debug("No buttons found, cooling down for {Cooldown}", cooldown);
-            return false;
+            _logger.Debug("No buttons found");
+            return ScanResult.NothingFound;
         }
 
         // Process
-        foreach (var button in buttons)
+        var scanResult = ScanResult.InProcess;
+        foreach (Button button in buttons)
         {
-            string? name = button!.Name;
+            string? name = button.Name;
 
+            // One button we know is last, which lets us cooldown
+            if (string.Equals(name, _lastButtonName))
+            {
+                _logger.Debug("Clicking {ButtonName}: end-of-sequence", name);
+                await button.InvokeAsync();
+                scanResult = ScanResult.Ended;
+            }
             // Some we can just click
-            if (_clickButtonNames.Contains(name))
+            else if (_clickButtonNames.Contains(name))
             {
                 _logger.Debug("Auto-clicking {ButtonName}", name);
                 await button.InvokeAsync();
-                continue;
             }
-
             // Some require more
-            if (name == "Continue with Oculus")
+            else if (name == "Continue with Oculus")
             {
                 _logger.Debug("Scrolling to enable 'Continue with Oculus'");
                 // Look for the last ListItem that is offscreen
                 var lastListItem = _documentElement
                                    .FindAllDescendants(f => f.ByControlType(ControlType.ListItem))
-                                   .Select(ae => ae?.AsListBoxItem())
+                                   .Where(ae => ae.Properties.IsOffscreen.IsSupported)
+                                   .Select(ae => ae.AsListBoxItem())
                                    .LastOrDefault(item => item is not null && item.IsOffscreen);
+                // Scroll down to it (to the bottom)
                 lastListItem?.ScrollIntoView();
+                // Now we can click the button
                 await button.InvokeAsync();
-                continue;
             }
-
-            // Ignore this button
-            _ignoredButtonNames.Add(name);
+            else
+            {
+                // Permanently ignore this button
+                _logger.Debug("Permanently ignoring {ButtonName}", name);
+                _ignoredButtonNames.Add(name);
+            }
         }
 
-        // Scan again immediately
-        return true;
+        return scanResult;
     }
 
 

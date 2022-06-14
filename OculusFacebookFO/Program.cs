@@ -1,6 +1,4 @@
 ﻿using System.Diagnostics;
-using FlaUI.Core.AutomationElements;
-using FlaUI.Core.Definitions;
 using Microsoft.Extensions.Configuration;
 using Serilog;
 using Serilog.Events;
@@ -12,7 +10,7 @@ internal static class Program
 {
     public static async Task<int> Main(string[] args)
     {
-        Log.Logger = new LoggerConfiguration()
+        var logger = Log.Logger = new LoggerConfiguration()
                      .MinimumLevel.Is(LogEventLevel.Verbose)
                      .WriteTo.Console(theme: SystemConsoleTheme.Colored)
                      .CreateLogger();
@@ -39,8 +37,9 @@ internal static class Program
         }
         catch (Exception ex)
         {
+            logger.Fatal(ex, "Unhandled application exception");
             Debugger.Break();
-            throw;
+            return 1;
         }
         finally
         {
