@@ -6,6 +6,8 @@
         <UseWpf>true</UseWpf>
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
+        <AssemblyName>OculusFacebookFO</AssemblyName>
+        <RootNamespace>OculusFacebookFO</RootNamespace>
     </PropertyGroup>
 
     <ItemGroup>
@@ -27,11 +29,6 @@
       <Content Include="appsettings.json">
         <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       </Content>
-    </ItemGroup>
-
-    <ItemGroup>
-      <ProjectReference Include="..\Controls\Controls.csproj" />
-      <ProjectReference Include="..\Core\Core.csproj" />
     </ItemGroup>
 
 </Project>

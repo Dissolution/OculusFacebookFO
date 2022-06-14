@@ -1,6 +1,6 @@
 ﻿using FlaUI.Core.AutomationElements;
 
-namespace OculusFacebookFO.Controls;
+namespace OculusFacebookFO;
 
 public static class AutomationElementExtensions
 {

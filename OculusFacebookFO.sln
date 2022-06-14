@@ -1,6 +1,6 @@
 ﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OculusFacebookFO.Console", "OculusFacebookFO.Console\OculusFacebookFO.Console.csproj", "{93A18C72-CA43-40D3-B5BD-18DD15646C8B}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OculusFacebookFO", "OculusFacebookFO\OculusFacebookFO.csproj", "{93A18C72-CA43-40D3-B5BD-18DD15646C8B}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
