@@ -1,86 +1,73 @@
 ﻿using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using FlaUI.Core;
 using FlaUI.Core.AutomationElements;
 using FlaUI.Core.Definitions;
 using FlaUI.Core.EventHandlers;
 using Serilog;
-using Debug = System.Diagnostics.Debug;
 
 namespace OculusFacebookFO;
 
 public sealed class OculusApp : IDisposable
 {
-    public static async Task<OculusApp> CreateAsync(string oculusAppPath)
+    private static readonly ILogger _logger = Log.Logger;
+
+    public static async Task<OculusApp> CreateAsync(string oculusAppPath, CancellationToken token = default)
     {
-        // Find the running Oculus Process
-        var oculusAppProcess = await AttachAsync(oculusAppPath);
+        // Wait / Attach to a running Oculus App Process
+        var oculusAppName = Path.GetFileNameWithoutExtension(oculusAppPath);
+        var oculusAppProcess = await WaitAttachAsync(oculusAppName, token);
+        token.ThrowIfCancellationRequested();
+        
         // Setup FLAUI -- passed on or we dispose
         var app = Application.Attach(oculusAppProcess);
+        token.ThrowIfCancellationRequested();
+        
         // Try to acquire the main window
-        var mainWindow = app.GetMainWindow(Program.Automation, TimeSpan.FromSeconds(30));
+        var timeout = TimeSpan.FromSeconds(30);
+        var mainWindow = app.GetMainWindow(Program.Automation, timeout);
         if (mainWindow is null)
-            throw new OculusApplicationException($"Could not find Oculus {app} Main Window");
+            throw new OculusApplicationException($"Could not find Oculus {app} Main Window in {timeout}");
+        token.ThrowIfCancellationRequested();
+        
         // Try to acquire the main document
         var mainDocument = await GetMainDocumentAsync(mainWindow);
+        token.ThrowIfCancellationRequested();
+        
         // Now we can create the app
         return new OculusApp(oculusAppProcess, app, mainWindow, mainDocument);
     }
 
-    private static Task<Process> AttachAsync(string oculusAppPath)
+    private static async Task<Process> WaitAttachAsync(string oculusAppName, CancellationToken token = default)
     {
-        if (!File.Exists(oculusAppPath))
-            throw new OculusApplicationException($"Invalid Oculus Application Path '{oculusAppPath}'");
-        // Process name will be file name without extension
-        var processName = Path.GetFileNameWithoutExtension(oculusAppPath);
-
-        // Look for valid Process
-        var process = Process.GetProcessesByName(processName)
-                               .Where(IsValidProcess)
-                               .OneOrDefault();
-        if (process is null)
-            throw new OculusApplicationException($"Oculus Application is not running");
-        process.WaitForInputIdle();
-        return Task.FromResult(process);
-    }
-
-    private static async Task<Process> AttachOrLaunchAsync(string oculusAppPath)
-    {
-        if (!File.Exists(oculusAppPath))
-            throw new OculusApplicationException($"Invalid Oculus Application Path '{oculusAppPath}'");
-        // Process name will be file name without extension
-        var processName = Path.GetFileNameWithoutExtension(oculusAppPath);
-
-        // Look for valid Processes with this name
-        var processes = Process.GetProcessesByName(processName)
-                               .Where(IsValidProcess)
-                               .ToList();
-
-        var process = processes.OneOrDefault();
-        // None, we have to launch
-        if (process is null)
+        while (!token.IsCancellationRequested)
         {
-            process = Process.Start(oculusAppPath);
-            await Task.Delay(TimeSpan.FromSeconds(5));
-           
-            if (process is null || process.HasExited)
-                throw new OculusApplicationException($"Could not launch the Oculus Application at '{oculusAppPath}'");
-            // Wait until it's ready
-            process.WaitForInputIdle((int)TimeSpan.FromSeconds(30).TotalMilliseconds);
-            while (!IsValidProcess(process))
+            // Try to find a single matching process
+            var process = Process.GetProcessesByName(oculusAppName)
+                                 .Where(IsValidProcess)
+                                 .OneOrDefault();
+            if (process is not null)
             {
-                await Task.Delay(TimeSpan.FromMilliseconds(100));
+                _logger.Debug("Found Oculus App Process: {Process}", process);   
+                return process;
             }
-            //process.WaitForInputIdle((int)TimeSpan.FromSeconds(30).TotalMilliseconds);
+            
+            // Cooldown
+            var cooldown = TimeSpan.FromSeconds(5);
+            _logger.Debug("Did not find Oculus App Process, waiting {Cooldown}", cooldown);
+            await Task.Delay(cooldown, token);
         }
-
-        Debug.Assert(process is not null);
-        Debug.Assert(IsValidProcess(process));
-        return process;
+        token.ThrowIfCancellationRequested();
+        throw new TaskCanceledException();
     }
 
-    private static bool IsValidProcess(Process process)
+    /// <summary>
+    /// Determines whether the given <paramref name="process"/> is one that we can interact with
+    /// </summary>
+    private static bool IsValidProcess([NotNullWhen(true)] Process? process)
     {
+        if (process is null) return false;
         try
         {
             // Has not exited
@@ -99,18 +86,27 @@ public sealed class OculusApp : IDisposable
         }
     }
 
-    private static async Task<AutomationElement> GetMainDocumentAsync(Window mainWindow)
+    /// <summary>
+    /// Gets the main document <see cref="AutomationElement"/> for the given <paramref name="mainWindow"/>
+    /// </summary>
+    private static async Task<AutomationElement> GetMainDocumentAsync(Window mainWindow, CancellationToken token = default)
     {
         // We might have to wait a bit while things shuffle, so be gentle
-        AutomationElement? docElement;
-        while (true)
+        AutomationElement? docElement = null;
+        while (!token.IsCancellationRequested)
         {
             docElement = mainWindow.FindFirstChild(cf => cf.ByControlType(ControlType.Document).And(cf.ByName("Oculus")));
-            if (docElement is not null) break;
-            await Task.Delay(TimeSpan.FromSeconds(0.5d));
+            if (docElement is not null)
+            {
+                _logger.Debug("{MainWindow} found {MainDocument}", mainWindow, docElement);
+                break;
+            }
+            var cooldown = TimeSpan.FromSeconds(0.5);
+            _logger.Debug("{MainWindow} could not find main document, waiting {Cooldown}", mainWindow, cooldown);
+            await Task.Delay(cooldown, token);
         }
-
-        return docElement;
+        token.ThrowIfCancellationRequested();
+        return docElement!;
     }
 
     private readonly Process _process;
@@ -132,7 +128,7 @@ public sealed class OculusApp : IDisposable
             {
                 _structureChangedEventHandler =
                     _mainDocument.RegisterStructureChangedEvent(TreeScope.Subtree, OnStructureChanged);
-                Log.Logger.Debug("Document watching for Structure Changes");
+                _logger.Debug("Now watching {MainDocument} for Structure Changes", _mainDocument);
             }
             _structureChanged += value;
         }
@@ -151,9 +147,8 @@ public sealed class OculusApp : IDisposable
                                     StructureChangeType structureChangeType,
                                     int[] rid)
     {
-        Log.Logger
-           .Information("{ChangeType}: {RID}-{Element}",
-                        structureChangeType, rid, automationElement);
+        _logger.Information("{ChangeType}: {RID}-{Element}",
+                            structureChangeType, rid, automationElement);
         _structureChanged?.Invoke(automationElement, structureChangeType, rid);
     }
 
@@ -167,6 +162,6 @@ public sealed class OculusApp : IDisposable
         }
         _application.Dispose();
         _process.Dispose();
-        Log.Logger.Debug("Oculus App Disposed");
+        _logger.Debug("Oculus App Disposed");
     }
 }

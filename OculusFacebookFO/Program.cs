@@ -1,5 +1,4 @@
 ﻿using System.Diagnostics;
-using System.Diagnostics.CodeAnalysis;
 using FlaUI.Core;
 using FlaUI.UIA3;
 using Microsoft.Extensions.Configuration;
@@ -19,7 +18,7 @@ internal static class Program
         get => _automation!;
     }
     
-    public static async Task<int> Main(string[] args)
+    public static async Task<int> Main()
     {
         // setup logging
         var logger = Log.Logger = new LoggerConfiguration()
@@ -28,43 +27,30 @@ internal static class Program
                      .CreateLogger();
         // setup flaui automation
         _automation = new UIA3Automation();
+        // our universal cancellation that can be triggered by Esc
+        using var cts = new CancellationTokenSource();
+        // IConfiguration
+        var config = new ConfigurationBuilder()
+                     .AddJsonFile("appsettings.json")
+                     .Build();
         try
         {
-            // Scan
-            Console.WriteLine("Press Esc at any time to kill this process.");
-            
-            using var cts = new CancellationTokenSource();
-            var config = new ConfigurationBuilder()
-                         .AddJsonFile("appsettings.json")
-                         .Build();
-
             var oculusAppPath = config.GetValue<string?>("OculusAppPath");
             if (string.IsNullOrWhiteSpace(oculusAppPath))
                 throw new OculusApplicationException($"Invalid Oculus Application Path '{oculusAppPath}'");
             using var oculusApp = await OculusApp.CreateAsync(oculusAppPath);
 
-            var sequence = config.GetRequiredSection("Sequence")
-                                 .Get<Dictionary<string, HandleButton>>();
+            var sequence = config.GetRequiredSection("ButtonActions")
+                                 .Get<Dictionary<string, ButtonAction>>();
 
-            var scanner = new SequenceScanner(oculusApp, sequence);
+            var scanner = new ButtonScanner(oculusApp, sequence);
             
+            // Scan
+            Console.WriteLine("Press Esc at any time to kill this process.");
             var escTask = WaitForEscAsync(cts.Token);
             var scannerTask = scanner.ScanAsync(cts.Token);
             var completedTask = await Task.WhenAny(escTask, scannerTask);
             Debugger.Break();
-
-            /*
-             using var scanner = new Scanner(config, Log.Logger);
-            await scanner.InitializeAsync(cts.Token);
-            
-            //await scanner.ScanAsync(cts.Token);
-
-            var scannerTask = scanner.ScanAsync(cts.Token);
-            //var scannerTask = scanner.ReactAsync(cts.Token);
-            var escTask = WaitForEscAsync(cts.Token);
-            var completed = await Task.WhenAny(scannerTask, escTask);
-            Debugger.Break();
-            */
         }
         catch (Exception ex)
         {
@@ -99,5 +85,6 @@ internal static class Program
             // Cooldown
             await Task.Delay(TimeSpan.FromSeconds(0.5d), token);
         }
+        token.ThrowIfCancellationRequested();
     }
 }
