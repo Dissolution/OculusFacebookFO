@@ -1,4 +1,5 @@
 ﻿using System.Diagnostics.CodeAnalysis;
+using System.Text;
 using FlaUI.Core.AutomationElements;
 using Microsoft.Extensions.Configuration;
 
@@ -69,5 +70,16 @@ public static class Extensions
         {
             throw new InvalidOperationException($"{configuration} key '{keyName}' is not a {typeof(T).Name} value", ex);
         }
+    }
+
+    public static string FullPath(this AutomationElement? automationElement)
+    {
+        var sb = new StringBuilder();
+        while (automationElement is not null)
+        {
+            sb.Insert(0, automationElement);
+            automationElement = automationElement.Parent;
+        }
+        return sb.ToString();
     }
 }
